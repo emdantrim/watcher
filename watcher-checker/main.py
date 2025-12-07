@@ -1,13 +1,22 @@
 import hashlib
 import time
+import threading
 from datetime import datetime
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import requests
 from sqlalchemy.orm import Session
+from fastapi import FastAPI
+import uvicorn
 
-from database import SessionLocal
-from models import WatchTarget, ContentCheck
+from shared.database import SessionLocal
+from shared.models import WatchTarget, ContentCheck
+
+# Global scheduler instance
+scheduler = None
+
+# FastAPI app
+app = FastAPI(title="Watcher Checker API", version="1.0.0")
 
 
 def hash_content(content: str) -> str:
@@ -15,7 +24,7 @@ def hash_content(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def check_url(target: WatchTarget, db: Session):
+def check_target(target: WatchTarget, db: Session):
     """Poll a single URL and store the results"""
     print(f"Checking {target.url} ({target.name or 'unnamed'})...")
 
@@ -83,28 +92,38 @@ def check_all_targets():
         print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] Checking {len(targets)} target(s)...")
 
         for target in targets:
-            check_url(target, db)
+            check_target(target, db)
 
     finally:
         db.close()
 
 
-def schedule_target_checks(scheduler: BlockingScheduler):
+def schedule_target_checks(sched):
     """Schedule individual checks for each target based on their interval"""
     db = SessionLocal()
     try:
         targets = db.query(WatchTarget).filter(WatchTarget.enabled == True).all()
 
+        # Get all existing job IDs for targets
+        existing_job_ids = {job.id for job in sched.get_jobs() if job.id.startswith("check_")}
+        current_target_ids = {f"check_{target.id}" for target in targets}
+
+        # Remove jobs for deleted targets
+        for job_id in existing_job_ids - current_target_ids:
+            sched.remove_job(job_id)
+            print(f"Removed job {job_id}")
+
+        # Add or update jobs for current targets
         for target in targets:
             job_id = f"check_{target.id}"
 
             # Remove existing job if it exists
-            if scheduler.get_job(job_id):
-                scheduler.remove_job(job_id)
+            if sched.get_job(job_id):
+                sched.remove_job(job_id)
 
             # Add new job with target's interval
-            scheduler.add_job(
-                func=lambda t=target: check_url(t, SessionLocal()),
+            sched.add_job(
+                func=lambda t=target: check_target(t, SessionLocal()),
                 trigger=IntervalTrigger(seconds=target.check_interval_seconds),
                 id=job_id,
                 name=f"Check {target.url}",
@@ -117,11 +136,35 @@ def schedule_target_checks(scheduler: BlockingScheduler):
         db.close()
 
 
+@app.get("/")
+def read_root():
+    return {
+        "service": "Watcher Checker API",
+        "version": "1.0.0",
+        "status": "running"
+    }
+
+
+@app.post("/reload")
+def reload_schedules():
+    """Reload target schedules from database"""
+    global scheduler
+    if scheduler is None:
+        return {"error": "Scheduler not initialized"}, 500
+
+    print("\n[API] Reloading target schedules...")
+    schedule_target_checks(scheduler)
+    return {"status": "success", "message": "Schedules reloaded"}
+
+
 def main():
     """Main watcher service"""
-    print("Starting Watcher Service...")
+    global scheduler
 
-    scheduler = BlockingScheduler()
+    print("Starting Watcher Checker Service...")
+
+    # Use BackgroundScheduler so it runs in a separate thread
+    scheduler = BackgroundScheduler()
 
     # Schedule a job to re-read targets every 5 minutes (in case intervals change)
     scheduler.add_job(
@@ -131,19 +174,20 @@ def main():
         name="Refresh target schedules"
     )
 
+    # Start the scheduler
+    scheduler.start()
+
     # Initial scheduling
     schedule_target_checks(scheduler)
 
     # Run an immediate check on startup
     check_all_targets()
 
-    print("\nWatcher service is running. Press Ctrl+C to exit.\n")
+    print("\nWatcher Checker service is running.")
+    print("API server starting on port 8001...\n")
 
-    try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        print("\nShutting down Watcher service...")
-        scheduler.shutdown()
+    # Run FastAPI server (this blocks)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 
 
 if __name__ == "__main__":

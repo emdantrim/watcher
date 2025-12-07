@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Docker & Database
+postgres_data/
+pgdata/
+.postgres/

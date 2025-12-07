@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_USER: watcher
       POSTGRES_PASSWORD: watcher123
-      POSTGRES_DB: watcher_db
+      POSTGRES_DB: watcher
     ports:
       - "5432:5432"
     volumes:
@@ -17,6 +17,61 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - watcher-network
+
+  migrations:
+    build:
+      context: .
+      dockerfile: migrations/Dockerfile
+    container_name: watcher-migrations
+    environment:
+      DATABASE_URL: postgresql://watcher:watcher123@postgres:5432/watcher
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - watcher-network
+
+  watcher-checker:
+    build:
+      context: .
+      dockerfile: watcher-checker/Dockerfile
+    container_name: watcher-checker
+    environment:
+      DATABASE_URL: postgresql://watcher:watcher123@postgres:5432/watcher
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - watcher-network
+    restart: unless-stopped
+
+  watcher-web:
+    build:
+      context: .
+      dockerfile: watcher-web/Dockerfile
+    container_name: watcher-web
+    environment:
+      DATABASE_URL: postgresql://watcher:watcher123@postgres:5432/watcher
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - watcher-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+
+networks:
+  watcher-network:
+    driver: bridge

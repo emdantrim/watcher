@@ -69,6 +69,19 @@ services:
       - watcher-network
     restart: unless-stopped
 
+  watcher-frontend:
+    build:
+      context: ./watcher-frontend
+      dockerfile: Dockerfile
+    container_name: watcher-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - watcher-web
+    networks:
+      - watcher-network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
 
